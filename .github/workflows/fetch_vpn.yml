@@ -1,0 +1,34 @@
+name: Auto Fetch VPN Gate Data
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 每小时的第 0 分钟自动在海外服务器上执行一次
+  workflow_dispatch:     # 支持你在 GitHub 网页上手动点击按钮触发测试
+
+jobs:
+  update-list:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   
+      
+    steps:
+    - name: 1. 拉取当前仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 从官方接口下载最新数据
+      run: |
+        curl -sS "https://www.vpngate.net/api/iphone/" -o vpngate.txt
+
+    - name: 3. 自动提交变动并推送到仓库
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        
+        git add vpngate.txt
+        
+        if ! git diff --quiet --cached; then
+          git commit -m "自动更新: $(date '+%Y-%m-%d %H:%M:%S')"
+          git push
+        else
+          echo "节点数据未发生变动，跳过本次提交。"
+        fi
