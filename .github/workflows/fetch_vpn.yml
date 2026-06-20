@@ -1,9 +1,9 @@
-name: Auto Fetch VPN Gate Data
+name: Auto Fetch & Accumulate VPN Gate Data
 
 on:
   schedule:
-    - cron: '0 * * * *' # 每小时的第 0 分钟自动在海外服务器上执行一次
-  workflow_dispatch:     # 支持你在 GitHub 网页上手动点击按钮触发测试
+    - cron: '0 * * * *' # 每小时自动滚雪球一次
+  workflow_dispatch:     # 支持手动点击测试
 
 jobs:
   update-list:
@@ -15,11 +15,71 @@ jobs:
     - name: 1. 拉取当前仓库代码
       uses: actions/checkout@v4
 
-    - name: 2. 从官方接口下载最新数据
-      run: |
-        curl -sS "https://www.vpngate.net/api/iphone/" -o vpngate.txt
+    - name: 2. 设置 Python 环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-    - name: 3. 自动提交变动并推送到仓库
+    - name: 3. 安装网络请求库
+      run: pip install requests
+
+    - name: 4. 执行增量去重合并算法
+      run: |
+        python -c "
+        import requests, csv, io, os
+        
+        # 1. 读取仓库里现有的老节点数据
+        existing_nodes = {}
+        header_comments = '#VPN Gate Ground Truth Data\\n'
+        
+        if os.path.exists('vpngate.txt'):
+            try:
+                with open('vpngate.txt', 'r', encoding='utf-8') as f:
+                    lines = f.read().splitlines()
+                    # 提取有效的 CSV 数据行
+                    csv_lines = [l for l in lines if l and not l.startswith('#') and l != '*']
+                    if csv_lines:
+                        # 补回表头进行解析
+                        header = '#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnConnections,Operator,Description,OpenVPN_ConfigData_Base64'
+                        csv_data = header + '\\n' + '\\n'.join(csv_lines)
+                        reader = csv.DictReader(io.StringIO(csv_data))
+                        for row in reader:
+                            if row.get('IP'):
+                                existing_nodes[row['IP']] = row
+            except Exception as e:
+                print(f'读取历史数据失败，将重新创建: {e}')
+
+        # 2. 远端抓取最新的一批精选节点（约100个）
+        try:
+            res = requests.get('https://www.vpngate.net/api/iphone/', timeout=15)
+            if res.status_code == 200:
+                new_lines = res.text.splitlines()
+                new_csv_data = '\\n'.join(new_lines[1:-2]) # 过滤头尾
+                new_reader = csv.DictReader(io.StringIO(new_csv_data))
+                
+                # 3. 将新节点合并到历史节点中，IP 相同的直接覆盖更新状态
+                for row in new_reader:
+                    if row.get('IP'):
+                        existing_nodes[row['IP']] = row
+        except Exception as e:
+            print(f'抓取远端新节点失败: {e}')
+
+        # 4. 把合并去重后的海量数据重新写回 vpngate.txt
+        if existing_nodes:
+            output = io.StringIO()
+            fieldnames = ['#HostName', 'IP', 'Score', 'Ping', 'Speed', 'CountryLong', 'CountryShort', 'NumVpnConnections', 'Operator', 'Description', 'OpenVPN_ConfigData_Base64']
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            for key in sorted(existing_nodes.keys()):
+                writer.writerow(existing_nodes[key])
+            
+            final_text = header_comments + output.getvalue() + '*\\n'
+            with open('vpngate.txt', 'w', encoding='utf-8') as f:
+                f.write(final_text)
+            print(f'合并去重成功！当前蓄水池总节点数: {len(existing_nodes)}')
+        "
+
+    - name: 5. 自动提交变动并推送到仓库
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -27,8 +87,8 @@ jobs:
         git add vpngate.txt
         
         if ! git diff --quiet --cached; then
-          git commit -m "自动更新: $(date '+%Y-%m-%d %H:%M:%S')"
+          git commit -m "滚雪球更新: 节点总数扩容 ($(date '+%Y-%m-%d %H:%M:%S'))"
           git push
         else
-          echo "节点数据未发生变动，跳过本次提交。"
+          echo "节点没有产生新变动，跳过本次提交。"
         fi
